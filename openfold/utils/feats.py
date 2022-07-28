@@ -72,9 +72,13 @@ def build_template_angle_feat(template_feats):
         "template_alt_torsion_angles_sin_cos"
     ]
     torsion_angles_mask = template_feats["template_torsion_angles_mask"]
+    # habana limit change: torch.cat uses first input as output dtype
+    # template_aatype is int64
+    # nn.functional.one_hot(template_aatype, 22)  ->
+    # nn.functional.one_hot(template_aatype, 22).to(torch.float32)
     template_angle_feat = torch.cat(
         [
-            nn.functional.one_hot(template_aatype, 22),
+            nn.functional.one_hot(template_aatype, 22).to(torch.float32),
             torsion_angles_sin_cos.reshape(
                 *torsion_angles_sin_cos.shape[:-2], 14
             ),
@@ -103,9 +107,16 @@ def build_template_pair_feat(
     dgram = torch.sum(
         (tpb[..., None, :] - tpb[..., None, :, :]) ** 2, dim=-1, keepdim=True
     )
+    # habana limit change: linspace has bug, now it is fixed in R1.5.0
+    # lower = torch.linspace(min_bin, max_bin, no_bins, device=tpb.device) ** 2 ->
+    # lower = torch.linspace(min_bin, max_bin, no_bins, device="cpu").to(tpb.device) ** 2
+    # 
+    # mul not support bool
+    # dgram = ((dgram > lower) * (dgram < upper)).type(dgram.dtype) - >
+    # dgram = ((dgram > lower).type(dgram.dtype) * (dgram < upper).type(dgram.dtype)
     lower = torch.linspace(min_bin, max_bin, no_bins, device=tpb.device) ** 2
     upper = torch.cat([lower[1:], lower.new_tensor([inf])], dim=-1)
-    dgram = ((dgram > lower) * (dgram < upper)).type(dgram.dtype)
+    dgram = (dgram > lower).type(dgram.dtype) * (dgram < upper).type(dgram.dtype)
 
     to_concat = [dgram, template_mask_2d[..., None]]
 
@@ -118,12 +129,12 @@ def build_template_pair_feat(
     to_concat.append(
         aatype_one_hot[..., None, :, :].expand(
             *aatype_one_hot.shape[:-2], n_res, -1, -1
-        )
+        ).to(dgram.dtype)
     )
     to_concat.append(
         aatype_one_hot[..., None, :].expand(
             *aatype_one_hot.shape[:-2], -1, n_res, -1
-        )
+        ).to(dgram.dtype)
     )
 
     n, ca, c = [rc.atom_order[a] for a in ["N", "CA", "C"]]
@@ -161,8 +172,11 @@ def build_template_pair_feat(
 
 def build_extra_msa_feat(batch):
     msa_1hot = nn.functional.one_hot(batch["extra_msa"], 23)
+    # habana limit change: torch.cat uses first input as output dtype
+    # msa_1hot is int64
+    # msa_1hot  -> msa_1hot.to(torch.float32)
     msa_feat = [
-        msa_1hot,
+        msa_1hot.to(torch.float32),
         batch["extra_has_deletion"].unsqueeze(-1),
         batch["extra_deletion_value"].unsqueeze(-1),
     ]

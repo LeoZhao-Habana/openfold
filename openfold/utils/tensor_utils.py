@@ -352,6 +352,7 @@ def chunk_layer(
     no_chunks = flat_batch_dim // chunk_size + (
         flat_batch_dim % chunk_size != 0
     )
+#    print("chunk_layer flat_batch_dim={}, chunk_size={}, no_chunks={}".format(flat_batch_dim, chunk_size, no_chunks))
 
     i = 0
     out = None

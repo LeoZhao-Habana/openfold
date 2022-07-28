@@ -30,6 +30,7 @@ from openfold.utils.tensor_utils import (
     _chunk_slice,
 )
 
+from openfold.habana import is_habana, mark_step
 
 DEFAULT_LMA_Q_CHUNK_SIZE=1024
 DEFAULT_LMA_KV_CHUNK_SIZE=4096
@@ -102,6 +103,28 @@ def ipa_point_weights_init_(weights):
         softplus_inverse_1 = 0.541324854612918
         weights.fill_(softplus_inverse_1)
 
+def habana_matmul(x, y):
+    if is_habana():
+
+        ''' 5D tensor is supported in R1.5.0  
+        if len(x.shape) == 5:
+            s0 = x.shape[0]
+            s1 = x.shape[1]
+            x = x.reshape(-1, x.shape[2], x.shape[3], x.shape[4])
+            y = y.reshape(-1, y.shape[2], y.shape[3], y.shape[4])
+            out = torch.matmul(x, y)
+            return out.reshape(s0, s1, out.shape[1], out.shape[2], out.shape[3])
+        '''
+        if len(x.shape) == 6:
+            s0 = x.shape[0]
+            s1 = x.shape[1]
+            s2 = x.shape[2]
+            x = x.reshape(-1, x.shape[3], x.shape[4], x.shape[5])
+            y = y.reshape(-1, y.shape[3], y.shape[4], y.shape[5])
+            out = torch.matmul(x, y)
+            return out.reshape(s0, s1, s2, out.shape[1], out.shape[2], out.shape[3])
+
+    return torch.matmul(x, y)
 
 class Linear(nn.Linear):
     """
@@ -170,6 +193,24 @@ class Linear(nn.Linear):
             else:
                 raise ValueError("Invalid init string.")
 
+    def forward(self, x):
+        if is_habana():
+            if len(x.shape) == 4:
+                s0 = x.shape[0]
+                s1 = x.shape[1]
+                x = x.reshape(-1, x.shape[2], x.shape[3])
+                out = super(Linear, self).forward(x)
+                return out.reshape(s0, s1, out.shape[1], out.shape[2])
+
+            if len(x.shape) == 5:
+                s0 = x.shape[0]
+                s1 = x.shape[1]
+                s2 = x.shape[2]
+                x = x.reshape(-1, x.shape[3], x.shape[4])
+                out = super(Linear, self).forward(x)
+                return out.reshape(s0, s1, s2, out.shape[1], out.shape[2])
+
+        return super(Linear, self).forward(x)
 
 class LayerNorm(nn.Module):
     def __init__(self, c_in, eps=1e-5):
@@ -183,7 +224,7 @@ class LayerNorm(nn.Module):
 
     def forward(self, x): 
         d = x.dtype
-        if(d is torch.bfloat16 and not deepspeed.utils.is_initialized()):
+        if(d is torch.bfloat16 ): #not deepspeed.utils.is_initialized()):
             with torch.cuda.amp.autocast(enabled=False):
                 out = nn.functional.layer_norm(
                     x, 
@@ -211,9 +252,14 @@ def softmax_no_cast(t: torch.Tensor, dim: int = -1) -> torch.Tensor:
         type bfloat16
     """
     d = t.dtype
-    if(d is torch.bfloat16 and not deepspeed.utils.is_initialized()):
-        with torch.cuda.amp.autocast(enabled=False):
-            s = torch.nn.functional.softmax(t, dim=dim)
+    if(d is torch.bfloat16 ): #not deepspeed.utils.is_initialized()):
+        if is_habana():
+            from habana_frameworks.torch.hpex import hmp
+            with hmp.disable_casts():
+                s = torch.nn.functional.softmax(t, dim=dim).to(d)
+        else:
+            with torch.cuda.amp.autocast(enabled=False):
+                s = torch.nn.functional.softmax(t, dim=dim)
     else:
         s = torch.nn.functional.softmax(t, dim=dim)
 
@@ -226,7 +272,7 @@ def _attention(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, bias
     key = permute_final_dims(key, (1, 0))
 
     # [*, H, Q, K]
-    a = torch.matmul(query, key)
+    a = habana_matmul(query, key)
 
     for b in biases:
         a += b
@@ -234,8 +280,10 @@ def _attention(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, bias
     a = softmax_no_cast(a, -1)
 
     # [*, H, Q, C_hidden]
-    a = torch.matmul(a, value)
-
+    a = habana_matmul(a, value)
+    
+    # habana WA: to avoid Bgemm error
+    mark_step()
     return a
 
 
@@ -523,7 +571,7 @@ class GlobalAttention(nn.Module):
         bias = (self.inf * (mask - 1))[..., :, None, :]
         if(not use_lma):
             # [*, N_res, H, N_seq]
-            a = torch.matmul(
+            a = habana_matmul(
                 q,
                 k.transpose(-1, -2),  # [*, N_res, C_hidden, N_seq]
             )
@@ -531,7 +579,7 @@ class GlobalAttention(nn.Module):
             a = softmax_no_cast(a)
 
             # [*, N_res, H, C_hidden]
-            o = torch.matmul(
+            o = habana_matmul(
                 a,
                 v,
             )

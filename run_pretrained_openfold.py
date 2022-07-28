@@ -86,6 +86,10 @@ def run_model(model, batch, tag, args):
             for k,v in batch.items()
         }
  
+        from openfold.habana import mark_step
+        mark_step()
+        print(batch["target_feat"].shape)
+
         # Disable templates if there aren't any in the batch
         model.config.template.enabled = any([
             "template_" in k for k in batch
@@ -94,8 +98,9 @@ def run_model(model, batch, tag, args):
         logging.info(f"Running inference for {tag}...")
         t = time.perf_counter()
         out = model(batch)
+        mark_step()
         logging.info(f"Inference time: {time.perf_counter() - t}")
-    
+
     return out
 
 
@@ -200,8 +205,25 @@ def main(args):
             "be specified."
         )
 
+    if args.model_device == 'hpu':
+        from openfold.habana import enable_habana, enable_lazy_mode, enable_hmp
+        enable_habana()
+        print("Enable HPU")
+
+        if args.lazy_mode:
+            enable_lazy_mode()
+            print("Enable HPU lazy mode")
+        if args.hmp:
+            enable_hmp()
+            from habana_frameworks.torch.hpex import hmp
+            hmp.convert(opt_level=args.hmp_opt_level, bf16_file_path=args.hmp_bf16,
+                        fp32_file_path=args.hmp_fp32, isVerbose=args.hmp_verbose)
+
     model = model.to(args.model_device)
- 
+
+    logging.basicConfig(level=logging.INFO)
+#    logging.getLogger().setLevel(logging.INFO)
+
     template_featurizer = templates.TemplateHitFeaturizer(
         mmcif_dir=args.template_mmcif_dir,
         max_template_date=args.max_template_date,
@@ -274,11 +296,15 @@ def main(args):
         )
 
         batch = processed_feature_dict
-        out = run_model(model, batch, tag, args)
+        if args.hmp:
+            dtype = torch.bfloat16
+
+        for _ in range(2):
+            out = run_model(model, batch, tag, args)
 
         # Toss out the recycling dimensions --- we don't need them anymore
-        batch = tensor_tree_map(lambda x: np.array(x[..., -1].cpu()), batch)
-        out = tensor_tree_map(lambda x: np.array(x.cpu()), out)
+        batch = tensor_tree_map(lambda x: np.array(x[..., -1].to(torch.float32).cpu()) if x.dtype==torch.bfloat16 else np.array(x[..., -1].cpu()), batch)
+        out = tensor_tree_map(lambda x: np.array(x.to(torch.float32).cpu()) if x.dtype==torch.bfloat16 else np.array(x.cpu()), out)
         
         unrelaxed_protein = prep_output(
             out, batch, feature_dict, feature_processor, args
@@ -296,8 +322,9 @@ def main(args):
             fp.write(protein.to_pdb(unrelaxed_protein))
 
         if(not args.skip_relaxation):
+            # habana change: add hpu into non use-gpu case
             amber_relaxer = relax.AmberRelaxation(
-                use_gpu=(args.model_device != "cpu"),
+                use_gpu=(args.model_device != "cpu" and args.model_device != "hpu"),
                 **config.relax,
             )
             
@@ -307,7 +334,12 @@ def main(args):
             if("cuda" in args.model_device):
                 device_no = args.model_device.split(":")[-1]
                 os.environ["CUDA_VISIBLE_DEVICES"] = device_no
-            relaxed_pdb_str, _, _ = amber_relaxer.process(prot=unrelaxed_protein)
+            if args.hmp:
+                from habana_frameworks.torch.hpex import hmp
+                with hmp.disable_casts():
+                    relaxed_pdb_str, _, _ = amber_relaxer.process(prot=unrelaxed_protein)
+            else:
+                relaxed_pdb_str, _, _ = amber_relaxer.process(prot=unrelaxed_protein)
             os.environ["CUDA_VISIBLE_DEVICES"] = visible_devices
             logging.info(f"Relaxation time: {time.perf_counter() - t}")
             
@@ -391,6 +423,32 @@ if __name__ == "__main__":
         "--multimer_ri_gap", type=int, default=200,
         help="""Residue index offset between multiple sequences, if provided"""
     )
+    # habana specific arguments
+    parser.add_argument(
+        '--lazy_mode', action='store_true', default=False,
+        help="Enable lazy mode on hpu device, default eager mode"
+    )
+    parser.add_argument(
+        "--hmp", action='store_true', default=False,
+        help="Whether to use habana mixed precision"
+    )
+    parser.add_argument(
+        "--hmp-bf16", type=str, default=None,
+        help="Path to bf16 ops list in hmp O1 mode"
+    )
+    parser.add_argument(
+        "--hmp-fp32", type=str, default=None,
+        help="Path to fp32 ops list in hmp O1 mode"
+    )
+    parser.add_argument(
+        "--hmp-opt-level", type=str, default='O1',
+        help="Choose optimization level for hmp"
+    )
+    parser.add_argument(
+        "--hmp-verbose", action='store_true', default=False,
+        help='Enable verbose mode for hmp'
+    )
+
     add_data_args(parser)
     args = parser.parse_args()
 

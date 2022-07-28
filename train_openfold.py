@@ -49,6 +49,7 @@ from scripts.zero_to_fp32 import (
 
 from openfold.utils.logger import PerformanceLoggingCallback
 
+from openfold.habana import is_habana, enable_habana, disable_lazy_mode, mark_step, habana_timer, print_peak_memory, enable_hmp
 
 class OpenFoldWrapper(pl.LightningModule):
     def __init__(self, config):
@@ -100,16 +101,24 @@ class OpenFoldWrapper(pl.LightningModule):
         if(self.ema.device != batch["aatype"].device):
             self.ema.to(batch["aatype"].device)
 
+        batch = tensor_tree_map(lambda t: t.squeeze(0), batch)
+#        mark_step()
         # Run the model
         outputs = self(batch)
-        
+        print_peak_memory("after forward")
+
         # Remove the recycling dimension
         batch = tensor_tree_map(lambda t: t[..., -1], batch)
 
+#        mark_step()
         # Compute loss
+        ht = habana_timer()
+        ht.start("loss calculation")
         loss, loss_breakdown = self.loss(
             outputs, batch, _return_breakdown=True
         )
+#        mark_step()
+        ht.end("loss calculation")
 
         # Log it
         self._log(loss_breakdown, batch, outputs)
@@ -118,6 +127,22 @@ class OpenFoldWrapper(pl.LightningModule):
 
     def on_before_zero_grad(self, *args, **kwargs):
         self.ema.update(self.model)
+        mark_step()
+
+    def backward(self, loss, optimizer, optimizer_idx):
+        ht = habana_timer()
+        ht.start("pl backward")
+        loss.backward()
+        mark_step()
+        ht.end("pl backward")
+
+    def optimizer_step(self, epoch, batch_idx, optimizer, optimizer_idx,
+                    optimizer_closure, on_tpu, using_native_amp, using_lbfgs):
+        ht = habana_timer()
+        ht.start("pl optimizer_step")
+        optimizer.step(closure=optimizer_closure)
+        mark_step()
+        ht.end("pl optimizer_step")
 
     def validation_step(self, batch, batch_idx):
         # At the start of validation, load the EMA weights
@@ -204,12 +229,17 @@ class OpenFoldWrapper(pl.LightningModule):
         learning_rate: float = 1e-3,
         eps: float = 1e-5,
     ) -> torch.optim.Adam:
-        # Ignored as long as a DeepSpeed optimizer is configured
-        optimizer = torch.optim.Adam(
-            self.model.parameters(), 
-            lr=learning_rate, 
-            eps=eps
-        )
+        if is_habana():
+            from habana_frameworks.torch.hpex.optimizers import FusedAdamW
+            optimizer = FusedAdamW(self.model.parameters(), lr=learning_rate, eps=eps)
+        else:
+            # Ignored as long as a DeepSpeed optimizer is configured
+            optimizer = torch.optim.Adam(
+                self.model.parameters(), 
+                lr=learning_rate, 
+                eps=eps
+            )
+
         lr_scheduler = AlphaFoldLRScheduler(
             optimizer,
         )
@@ -231,6 +261,15 @@ class OpenFoldWrapper(pl.LightningModule):
 
 
 def main(args):
+    if args.accelerator == "hpu":
+        enable_habana()
+        print("use hpus lazy mode")
+        if args.disable_lazy_mode:
+            disable_lazy_mode()
+            print("disable lazy mode")
+        if int(args.devices) > 1:
+            os.environ["PL_TORCH_DISTRIBUTED_BACKEND"] = "hccl"
+
     if(args.seed is not None):
         seed_everything(args.seed) 
 
@@ -322,13 +361,35 @@ def main(args):
         os.system(f"{sys.executable} -m pip freeze > {freeze_path}")
         wdb_logger.experiment.save(f"{freeze_path}")
 
-    trainer = pl.Trainer.from_argparse_args(
-        args,
-        default_root_dir=args.output_dir,
-        strategy=strategy,
-        callbacks=callbacks,
-        logger=loggers,
-    )
+    if args.hmp:
+        enable_hmp()
+        # Convert to hmp based on ops conf
+        from pytorch_lightning.plugins import HPUPrecisionPlugin
+
+        trainer = pl.Trainer.from_argparse_args(
+            args,
+            default_root_dir=args.output_dir,
+            strategy=strategy,
+            callbacks=callbacks,
+            logger=loggers,
+            plugins=[
+                HPUPrecisionPlugin(
+                    precision=16,
+                    opt_level=args.hmp_opt_level,
+                    verbose=args.hmp_verbose,
+                    bf16_file_path=args.hmp_bf16,
+                    fp32_file_path=args.hmp_fp32,
+                )
+            ],
+        )
+    else:
+        trainer = pl.Trainer.from_argparse_args(
+            args,
+            default_root_dir=args.output_dir,
+            strategy=strategy,
+            callbacks=callbacks,
+            logger=loggers,
+        )
 
     if(args.resume_model_weights_only):
         ckpt_path = None
@@ -517,6 +578,32 @@ if __name__ == "__main__":
     parser.add_argument(
         "--_distillation_alignment_index_path", type=str, default=None,
     )
+    # habana arguments
+    parser.add_argument(
+        "--disable_lazy_mode", action='store_true', default=False,
+        help="Whether to disable habana lazy mode"
+    )
+    parser.add_argument(
+        "--hmp", action='store_true', default=False,
+        help="Whether to use habana mixed precision"
+    )
+    parser.add_argument(
+        "--hmp-bf16", type=str, default=None, 
+        help="Path to bf16 ops list in hmp O1 mode"
+    )
+    parser.add_argument(
+        "--hmp-fp32", type=str, default=None,
+        help="Path to fp32 ops list in hmp O1 mode"
+    )
+    parser.add_argument(
+        "--hmp-opt-level", type=str, default='O1',
+        help="Choose optimization level for hmp"
+    )
+    parser.add_argument(
+        "--hmp-verbose", action='store_true', default=False,
+        help='Enable verbose mode for hmp'
+    )
+
     parser = pl.Trainer.add_argparse_args(parser)
    
     # Disable the initial validation pass
@@ -528,7 +615,8 @@ if __name__ == "__main__":
     remove_arguments(
         parser, 
         [
-            "--accelerator", 
+        # To adapt Habana R1.5.0
+        #    "--accelerator", 
             "--resume_from_checkpoint",
             "--reload_dataloaders_every_epoch",
             "--reload_dataloaders_every_n_epochs",

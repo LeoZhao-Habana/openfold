@@ -75,15 +75,15 @@ setup(
         ],
         include_dirs=[
             os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), 
+                os.path.dirname(os.path.abspath(__file__)),
                 'openfold/utils/kernel/csrc/'
             )
         ],
         extra_compile_args={
             'cxx': ['-O3'] + version_dependent_macros,
             'nvcc': (
-                ['-O3', '--use_fast_math'] + 
-                version_dependent_macros + 
+                ['-O3', '--use_fast_math'] +
+                version_dependent_macros +
                 extra_cuda_flags
             ),
         }

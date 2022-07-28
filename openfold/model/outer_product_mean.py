@@ -22,6 +22,7 @@ import torch.nn as nn
 from openfold.model.primitives import Linear
 from openfold.utils.tensor_utils import chunk_layer
 
+from openfold.habana import is_habana, mark_step
 
 class OuterProductMean(nn.Module):
     """
@@ -53,6 +54,8 @@ class OuterProductMean(nn.Module):
     def _opm(self, a, b):
         # [*, N_res, N_res, C, C]
         outer = torch.einsum("...bac,...dae->...bdce", a, b)
+        # habana: to WA performance issue due to internal transpose, now it is deprecated in R1.5
+        #mark_step()
 
         # [*, N_res, N_res, C * C]
         outer = outer.reshape(outer.shape[:-2] + (-1,))
@@ -121,7 +124,11 @@ class OuterProductMean(nn.Module):
             outer = self._opm(a, b)
 
         # [*, N_res, N_res, 1]
-        norm = torch.einsum("...abc,...adc->...bdc", mask, mask)
+        # habana WA: to avoid transposeDontCareNodes pass failure just in this case.
+        if is_habana():
+            norm = torch.einsum("...ab,...ad->...bd", mask.squeeze(-1), mask.squeeze(-1)).unsqueeze(-1)
+        else:
+            norm = torch.einsum("...abc,...adc->...bdc", mask, mask)
 
         # [*, N_res, N_res, C_z]
         outer = outer / (self.eps + norm)

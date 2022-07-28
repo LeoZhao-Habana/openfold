@@ -29,6 +29,51 @@ kernels support in-place attention during inference and training. They use
 implementations, respectively.
 - **Efficient alignment scripts** using the original AlphaFold HHblits/JackHMMER pipeline or [ColabFold](https://github.com/sokrypton/ColabFold)'s, which uses the faster MMseqs2 instead. We've used them to generate millions of alignments that will be released alongside original OpenFold weights, trained from scratch using our code (more on that soon).
 
+## Execution on Habana
+To setup initial environment, run:
+
+```bash
+apt install aria2
+scripts/install_third_party_dependencies.sh
+scripts/install_hh_suite.sh
+```
+
+To activate habana environment, run:
+
+```bash
+source testenv.sh
+```
+
+To train openfold on gaudi, run:
+
+```bash
+python3 train_openfold.py dataset/train/mmcif dataset/train/alignment/ data/pdb_mmcif/mmcif_files/ output 2021-10-10 --template_release_dates_cache_path dataset/train/mmcif_cache.json  --train_chain_data_cache_path dataset/train/chain_data_cache.json --train_epoch_len 200  --hmp --hmp-bf16 ./habana/ops_bf16.txt --hmp-fp32 ./habana/ops_fp32.txt --precision 16  --devices 1 --accelerator hpu
+```
+
+To inference openfold on gaudi, run:
+
+```bash
+python3 run_pretrained_openfold.py \
+	dataset/test/ \
+	data/pdb_mmcif/mmcif_files/ \
+	--model_device hpu \
+	--lazy_mode \
+	--hmp \
+	--hmp-bf16 ./habana/ops_bf16.txt \
+	--hmp-fp32 ./habana/ops_fp32.txt \
+	--use_precomputed_alignments dataset/train/alignment/ \
+    --uniref90_database_path data/uniref90/uniref90.fasta \
+    --mgnify_database_path data/mgnify/mgy_clusters_2018_12.fa \
+    --pdb70_database_path data/pdb70/pdb70 \
+    --uniclust30_database_path data/uniclust30/uniclust30_2018_08/uniclust30_2018_08 \
+    --output_dir ./output \
+    --bfd_database_path data/bfd/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt \
+    --jackhmmer_binary_path lib/conda/envs/openfold_venv/bin/jackhmmer \
+    --hhblits_binary_path lib/conda/envs/openfold_venv/bin/hhblits \
+    --hhsearch_binary_path lib/conda/envs/openfold_venv/bin/hhsearch \
+    --kalign_binary_path lib/conda/envs/openfold_venv/bin/kalign
+```
+
 ## Installation (Linux)
 
 All Python dependencies are specified in `environment.yml`. For producing sequence 

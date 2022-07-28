@@ -18,7 +18,7 @@ dependencies:
       - pytorch_lightning==1.5.10
       - git+https://github.com/NVIDIA/dllogger.git
   - pytorch::pytorch=1.10.*
-  - conda-forge::python=3.7
+  - conda-forge::python=3.8
   - conda-forge::setuptools=59.5.0
   - conda-forge::pip
   - conda-forge::openmm=7.5.1

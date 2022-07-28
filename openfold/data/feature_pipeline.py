@@ -88,12 +88,21 @@ def np_example_to_features(
         np_example=np_example, features=feature_names
     )
     with torch.no_grad():
-        features = input_pipeline.process_tensors_from_config(
-            tensor_dict,
-            cfg.common,
-            cfg[mode],
-        )
-
+        from openfold.habana import is_habana, is_hmp
+        if is_habana() and is_hmp():
+            from habana_frameworks.torch.hpex import hmp
+            with hmp.disable_casts():
+                features = input_pipeline.process_tensors_from_config(
+                    tensor_dict,
+                    cfg.common,
+                    cfg[mode],
+            )
+        else:
+            features = input_pipeline.process_tensors_from_config(
+                tensor_dict,
+                cfg.common,
+                cfg[mode],
+            )
     return {k: v for k, v in features.items()}
 
 

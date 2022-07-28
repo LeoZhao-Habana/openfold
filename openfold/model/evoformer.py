@@ -39,6 +39,8 @@ from openfold.model.triangular_multiplicative_update import (
 from openfold.utils.checkpointing import checkpoint_blocks, get_checkpoint_fn
 from openfold.utils.tensor_utils import chunk_layer
 
+from openfold.habana import mark_step, habana_timer
+BW_WA = True
 
 class MSATransition(nn.Module):
     """
@@ -238,6 +240,7 @@ class EvoformerBlock(nn.Module):
         pair_dropout: float,
         inf: float,
         eps: float,
+        index: int,
     ):
         super(EvoformerBlock, self).__init__()
 
@@ -272,6 +275,8 @@ class EvoformerBlock(nn.Module):
             eps=eps,
         )
 
+        self.index = index
+
     def forward(self,
         m: torch.Tensor,
         z: torch.Tensor,
@@ -281,6 +286,12 @@ class EvoformerBlock(nn.Module):
         use_lma: bool = False,
         _mask_trans: bool = True,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        #leo: to WA backward mem issue
+        CPU_OFFLOAD_CHUNK = 16
+        if BW_WA and self.index % CPU_OFFLOAD_CHUNK == CPU_OFFLOAD_CHUNK - 1:
+            device = m.device
+            m = m.cpu()
+            m = m.to(device)
         m = m + self.msa_dropout_layer(
             self.msa_att_row(
                 m, 
@@ -305,7 +316,7 @@ class EvoformerBlock(nn.Module):
             use_lma=use_lma,
             _mask_trans=_mask_trans,
         )
-
+        
         return m, z
 
 
@@ -388,6 +399,8 @@ class ExtraMSABlock(nn.Module):
 
             return m1
         
+#        ht = habana_timer()
+#        ht.start("ExtraMSABlock")
         m = add(m, self.msa_dropout_layer(
             self.msa_att_row(
                 m.clone() if torch.is_grad_enabled() else m, 
@@ -395,13 +408,18 @@ class ExtraMSABlock(nn.Module):
                 mask=msa_mask, 
                 chunk_size=chunk_size,
                 use_lma=use_lma,
-                use_memory_efficient_kernel=not _chunk_logits and not use_lma,
+                #use_memory_efficient_kernel=not _chunk_logits and not use_lma,
+                use_memory_efficient_kernel=False,
                 _chunk_logits=_chunk_logits if torch.is_grad_enabled() else None,
                 _checkpoint_chunks=
                     self.ckpt if torch.is_grad_enabled() else False,
             )
         ))
         
+#        mark_step()
+#        ht.end("ExtraMSABlock 1")
+#        ht.start("ExtraMSABlock 2")
+
         def fn(m, z):
             m = add(
                 m, 
@@ -424,12 +442,20 @@ class ExtraMSABlock(nn.Module):
             
             return m, z
 
+#        print("leo torch.is_grad_enabled={}, self.ckpt={}".format(torch.is_grad_enabled(), self.ckpt))
         if(torch.is_grad_enabled() and self.ckpt):
             checkpoint_fn = get_checkpoint_fn()
             m, z = checkpoint_fn(fn, m, z)
         else:
             m, z = fn(m, z)
 
+        #leo: to WA backward mem issue
+        if BW_WA:
+            device = z.device
+            z = z.cpu()
+            z = z.to(device)
+#        mark_step()
+#        ht.end("ExtraMSABlock")
         return m, z
 
 
@@ -503,7 +529,7 @@ class EvoformerStack(nn.Module):
 
         self.blocks = nn.ModuleList()
 
-        for _ in range(no_blocks):
+        for i in range(no_blocks):
             block = EvoformerBlock(
                 c_m=c_m,
                 c_z=c_z,
@@ -518,6 +544,7 @@ class EvoformerStack(nn.Module):
                 pair_dropout=pair_dropout,
                 inf=inf,
                 eps=eps,
+                index=i,
             )
             self.blocks.append(block)
 
@@ -583,6 +610,7 @@ class EvoformerStack(nn.Module):
 
         s = self.linear(m[..., 0, :, :])
         
+#        mark_step()
         return m, z, s
 
 
@@ -686,6 +714,8 @@ class ExtraMSAStack(nn.Module):
                     m, z = checkpoint_fn(b, *(m, z))
                 else:
                     m, z = b(m, z)
+            
+#                mark_step()
         else:
             for b in self.blocks:
                 m, z = b(
@@ -701,4 +731,5 @@ class ExtraMSAStack(nn.Module):
                 if(self.clear_cache_between_blocks):
                     torch.cuda.empty_cache()
 
+#        mark_step()
         return z

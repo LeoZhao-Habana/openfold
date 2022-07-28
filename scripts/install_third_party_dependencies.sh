@@ -18,8 +18,9 @@ conda env create --name=${ENV_NAME} -f environment.yml
 source activate ${ENV_NAME}
 
 # Install DeepMind's OpenMM patch
+# habana change: change python3.7 to python3.8 to adapt habana SW
 OPENFOLD_DIR=$PWD
-pushd lib/conda/envs/$ENV_NAME/lib/python3.7/site-packages/ \
+pushd lib/conda/envs/$ENV_NAME/lib/python3.8/site-packages/ \
     && patch -p0 < $OPENFOLD_DIR/lib/openmm.patch \
     && popd
 

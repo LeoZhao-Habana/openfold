@@ -32,6 +32,7 @@ from openfold.utils.tensor_utils import (
     flatten_final_dims,
 )
 
+from openfold.habana import mark_step, habana_timer
 
 class MSAAttention(nn.Module):
     def __init__(
@@ -214,6 +215,8 @@ class MSAAttention(nn.Module):
                 cost of slower execution. Chunking is not performed by default.
                 
         """
+#        ht = habana_timer()
+#        ht.start("MSAAttention")
         if(_chunk_logits is not None):
             return self._chunked_msa_attn(
                 m=m, z=z, mask=mask, 
@@ -221,6 +224,8 @@ class MSAAttention(nn.Module):
             )           
 
         m, mask_bias, z = self._prep_inputs(m, z, mask)
+#        mark_step()
+#        print("MSAAttention 1 takes {} ms".format(t.end()))
 
         biases = [mask_bias]
         if(z is not None):
@@ -242,6 +247,8 @@ class MSAAttention(nn.Module):
                 use_memory_efficient_kernel=use_memory_efficient_kernel,
                 use_lma=use_lma,
             )
+#        mark_step()
+#        ht.end("MSAAttention")
 
         return m
 

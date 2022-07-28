@@ -411,8 +411,9 @@ def lddt(
             dim=-1,
         )
     )
+    # habana: to WA issue on mul with mixed dtype bool/fp32/bf16
     dists_to_score = (
-        (dmat_true < cutoff)
+        (dmat_true < cutoff).to(all_atom_mask.dtype)
         * all_atom_mask
         * permute_final_dims(all_atom_mask, (1, 0))
         * (1.0 - torch.eye(n, device=all_atom_mask.device))
@@ -488,8 +489,9 @@ def lddt_loss(
 
     score = score.detach()
 
-    bin_index = torch.floor(score * no_bins).long()
-    bin_index = torch.clamp(bin_index, max=(no_bins - 1))
+    # habana WA: to avoid issue on bf16->int64
+    bin_index = torch.floor(score * no_bins) #.long()
+    bin_index = torch.clamp(bin_index, max=(no_bins - 1)).float().long()
     lddt_ca_one_hot = torch.nn.functional.one_hot(
         bin_index, num_classes=no_bins
     )
@@ -764,15 +766,18 @@ def between_residue_bond_loss(
 
     # The C-N bond to proline has slightly different length because of the ring.
     next_is_proline = aatype[..., 1:] == residue_constants.resname_to_idx["PRO"]
+    # habana: to WA issue on mul with mixed dtype bool/fp32/bf16
+    next_is_proline_r = (~next_is_proline).to(c_n_bond_length.dtype)
+    next_is_proline = next_is_proline.to(c_n_bond_length.dtype)
     gt_length = (
-        ~next_is_proline
+        next_is_proline_r
     ) * residue_constants.between_res_bond_length_c_n[
         0
     ] + next_is_proline * residue_constants.between_res_bond_length_c_n[
         1
     ]
     gt_stddev = (
-        ~next_is_proline
+        next_is_proline_r
     ) * residue_constants.between_res_bond_length_stddev_c_n[
         0
     ] + next_is_proline * residue_constants.between_res_bond_length_stddev_c_n[
@@ -951,8 +956,9 @@ def between_residue_clash_loss(
     neighbour_mask = (
         residue_index[..., :, None, None, None] + 1
     ) == residue_index[..., None, :, None, None]
+    # habana: to WA issue on mul with mixed dtype bool/fp32/bf16 
     c_n_bonds = (
-        neighbour_mask
+        neighbour_mask.to(c_one_hot.dtype)
         * c_one_hot[..., None, None, :, None]
         * n_one_hot[..., None, None, None, :]
     )
@@ -1011,7 +1017,8 @@ def between_residue_clash_loss(
     return {
         "mean_loss": mean_loss,  # shape ()
         "per_atom_loss_sum": per_atom_loss_sum,  # shape (N, 14)
-        "per_atom_clash_mask": per_atom_clash_mask,  # shape (N, 14)
+        # habana WA, in R1.5.0, issue why insert first dim with 1 
+        "per_atom_clash_mask": per_atom_clash_mask.squeeze(0),  # shape (N, 14)
     }
 
 

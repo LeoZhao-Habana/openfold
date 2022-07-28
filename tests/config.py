@@ -2,11 +2,11 @@ import ml_collections as mlc
 
 consts = mlc.ConfigDict(
     {
-        "batch_size": 2,
-        "n_res": 11,
-        "n_seq": 13,
-        "n_templ": 3,
-        "n_extra": 17,
+        "batch_size": 1,
+        "n_res": 256,
+        "n_seq": 132,
+        "n_templ": 4,
+        "n_extra": 1024,
         "eps": 5e-4,
         # For compatibility with DeepMind's pretrained weights, it's easiest for
         # everyone if these take their real values.
