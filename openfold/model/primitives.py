@@ -194,22 +194,6 @@ class Linear(nn.Linear):
                 raise ValueError("Invalid init string.")
 
     def forward(self, x):
-        if is_habana():
-            if len(x.shape) == 4:
-                s0 = x.shape[0]
-                s1 = x.shape[1]
-                x = x.reshape(-1, x.shape[2], x.shape[3])
-                out = super(Linear, self).forward(x)
-                return out.reshape(s0, s1, out.shape[1], out.shape[2])
-
-            if len(x.shape) == 5:
-                s0 = x.shape[0]
-                s1 = x.shape[1]
-                s2 = x.shape[2]
-                x = x.reshape(-1, x.shape[3], x.shape[4])
-                out = super(Linear, self).forward(x)
-                return out.reshape(s0, s1, s2, out.shape[1], out.shape[2])
-
         return super(Linear, self).forward(x)
 
 class LayerNorm(nn.Module):

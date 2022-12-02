@@ -48,6 +48,7 @@ from openfold.utils.tensor_utils import (
 )
 
 from openfold.habana import mark_step, habana_timer, print_peak_memory
+#habana
 BW_WA=False
 
 class AlphaFold(nn.Module):
@@ -110,8 +111,6 @@ class AlphaFold(nn.Module):
 
     def embed_templates(self, batch, z, pair_mask, templ_dim): 
         # Embed the templates one at a time (with a poor man's vmap)
-#        ht = habana_timer()
-#        ht.start("embed_templates 1")
 
         template_embeds = []
         n_templ = batch["template_aatype"].shape[templ_dim]
@@ -147,9 +146,6 @@ class AlphaFold(nn.Module):
 
             template_embeds.append(single_template_embeds)
 
-#        ht.end("embed_templates 1")
-#        ht.start("embed_templates 2")
-
         template_embeds = dict_multimap(
             partial(torch.cat, dim=templ_dim),
             template_embeds,
@@ -163,9 +159,6 @@ class AlphaFold(nn.Module):
             use_lma=self.globals.use_lma,
             _mask_trans=self.config._mask_trans,
         )
-#        mark_step()
-#        ht.end("embed_templates 2")
-#        ht.start("embed_templates 3")
 
         # [*, N, N, C_z]
         t = self.template_pointwise_att(
@@ -182,9 +175,6 @@ class AlphaFold(nn.Module):
             ret["template_angle_embedding"] = template_embeds["angle"]
 
         ret.update({"template_pair_embedding": t})
-
-#        mark_step()
-#        ht.end("embed_templates 3")
 
         return ret
 
@@ -273,7 +263,6 @@ class AlphaFold(nn.Module):
         # Possibly prevents memory fragmentation
         del m_1_prev, z_prev, x_prev, m_1_prev_emb, z_prev_emb
 
-#        mark_step()
         ht.end("iteration preparation")
 
         ht.start("Embed the templates")
@@ -306,12 +295,11 @@ class AlphaFold(nn.Module):
                     [feats["msa_mask"], torsion_angles_mask[..., 2]], 
                     dim=-2
                 )
-        #leo: to WA backward mem issue
+        #habana: to WA backward mem issue
         if BW_WA:
             device = z.device
             z = z.cpu()
             z = z.to(device)
-#        mark_step()
         ht.end("Embed the templates")
 
         ht.start("Embed extra MSA features")
@@ -330,7 +318,6 @@ class AlphaFold(nn.Module):
                 pair_mask=pair_mask.to(dtype=z.dtype),
                 _mask_trans=self.config._mask_trans,
             )
-#        mark_step()
         ht.end("Embed extra MSA features")
 
         ht.start("evoformer")
@@ -347,9 +334,8 @@ class AlphaFold(nn.Module):
             use_lma=self.globals.use_lma,
             _mask_trans=self.config._mask_trans,
         )
-#        mark_step()
         ht.end("evoformer")
-        #leo: to WA backward mem issue
+        #habana: to WA backward mem issue
         if BW_WA:
             device = s.device
             s = s.cpu()
@@ -384,7 +370,6 @@ class AlphaFold(nn.Module):
         # [*, N, 3]
         x_prev = outputs["final_atom_positions"]
 
-#        mark_step()
         ht.end("3D structure")
 
         return outputs, m_1_prev, z_prev, x_prev

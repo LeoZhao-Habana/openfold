@@ -315,10 +315,11 @@ def supervised_chi_loss(
             [*] loss tensor
     """
     pred_angles = angles_sin_cos[..., 3:, :]
+    #habana: to WA one_hot issue with dim=1 and classes<64
     residue_type_one_hot = torch.nn.functional.one_hot(
-        aatype,
+        aatype.cpu(),
         residue_constants.restype_num + 1,
-    )
+    ).to("hpu")
     chi_pi_periodic = torch.einsum(
         "...ij,jk->ik",
         residue_type_one_hot.type(angles_sin_cos.dtype),
@@ -411,9 +412,8 @@ def lddt(
             dim=-1,
         )
     )
-    # habana: to WA issue on mul with mixed dtype bool/fp32/bf16
     dists_to_score = (
-        (dmat_true < cutoff).to(all_atom_mask.dtype)
+        (dmat_true < cutoff)
         * all_atom_mask
         * permute_final_dims(all_atom_mask, (1, 0))
         * (1.0 - torch.eye(n, device=all_atom_mask.device))
@@ -489,12 +489,13 @@ def lddt_loss(
 
     score = score.detach()
 
-    # habana WA: to avoid issue on bf16->int64
+    # habana: to WA issue on bf16->int64
     bin_index = torch.floor(score * no_bins) #.long()
     bin_index = torch.clamp(bin_index, max=(no_bins - 1)).float().long()
+    #habana: to WA one_hot issue with dim=1 and classes<64
     lddt_ca_one_hot = torch.nn.functional.one_hot(
-        bin_index, num_classes=no_bins
-    )
+        bin_index.cpu(), num_classes=no_bins
+    ).to("hpu")
 
     errors = softmax_cross_entropy(logits, lddt_ca_one_hot)
     all_atom_mask = all_atom_mask.squeeze(-1)
@@ -766,18 +767,15 @@ def between_residue_bond_loss(
 
     # The C-N bond to proline has slightly different length because of the ring.
     next_is_proline = aatype[..., 1:] == residue_constants.resname_to_idx["PRO"]
-    # habana: to WA issue on mul with mixed dtype bool/fp32/bf16
-    next_is_proline_r = (~next_is_proline).to(c_n_bond_length.dtype)
-    next_is_proline = next_is_proline.to(c_n_bond_length.dtype)
     gt_length = (
-        next_is_proline_r
+        ~next_is_proline
     ) * residue_constants.between_res_bond_length_c_n[
         0
     ] + next_is_proline * residue_constants.between_res_bond_length_c_n[
         1
     ]
     gt_stddev = (
-        next_is_proline_r
+        ~next_is_proline
     ) * residue_constants.between_res_bond_length_stddev_c_n[
         0
     ] + next_is_proline * residue_constants.between_res_bond_length_stddev_c_n[
@@ -938,16 +936,18 @@ def between_residue_clash_loss(
     )
 
     # Backbone C--N bond between subsequent residues is no clash.
+    #habana: to WA one_hot issue with dim=1 and classes<64
     c_one_hot = torch.nn.functional.one_hot(
-        residue_index.new_tensor(2), num_classes=14
-    )
+        residue_index.new_tensor(2).cpu(), num_classes=14
+    ).to("hpu")
     c_one_hot = c_one_hot.reshape(
         *((1,) * len(residue_index.shape[:-1])), *c_one_hot.shape
     )
     c_one_hot = c_one_hot.type(fp_type)
+    #habana: to WA one_hot issue with dim=1 and classes<64
     n_one_hot = torch.nn.functional.one_hot(
-        residue_index.new_tensor(0), num_classes=14
-    )
+        residue_index.new_tensor(0).cpu(), num_classes=14
+    ).to("hpu")
     n_one_hot = n_one_hot.reshape(
         *((1,) * len(residue_index.shape[:-1])), *n_one_hot.shape
     )
@@ -956,9 +956,8 @@ def between_residue_clash_loss(
     neighbour_mask = (
         residue_index[..., :, None, None, None] + 1
     ) == residue_index[..., None, :, None, None]
-    # habana: to WA issue on mul with mixed dtype bool/fp32/bf16 
     c_n_bonds = (
-        neighbour_mask.to(c_one_hot.dtype)
+        neighbour_mask
         * c_one_hot[..., None, None, :, None]
         * n_one_hot[..., None, None, None, :]
     )
@@ -971,7 +970,8 @@ def between_residue_clash_loss(
     cys_sg_idx = cys_sg_idx.reshape(
         *((1,) * len(residue_index.shape[:-1])), 1
     ).squeeze(-1)
-    cys_sg_one_hot = torch.nn.functional.one_hot(cys_sg_idx, num_classes=14)
+    #habana: to WA one_hot issue with dim=1 and classes<64
+    cys_sg_one_hot = torch.nn.functional.one_hot(cys_sg_idx.cpu(), num_classes=14).to("hpu")
     disulfide_bonds = (
         cys_sg_one_hot[..., None, None, :, None]
         * cys_sg_one_hot[..., None, None, None, :]

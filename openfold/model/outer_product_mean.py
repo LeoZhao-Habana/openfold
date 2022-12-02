@@ -124,7 +124,7 @@ class OuterProductMean(nn.Module):
             outer = self._opm(a, b)
 
         # [*, N_res, N_res, 1]
-        # habana WA: to avoid transposeDontCareNodes pass failure just in this case.
+        # habana: WA einsum first/last dim=1 issue, will be fixed in 1.7.0
         if is_habana():
             norm = torch.einsum("...ab,...ad->...bd", mask.squeeze(-1), mask.squeeze(-1)).unsqueeze(-1)
         else:
